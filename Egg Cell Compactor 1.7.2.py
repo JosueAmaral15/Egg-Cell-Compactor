@@ -73,15 +73,30 @@ Site responsável por explicar o módulo:https://p5r.uk/quine-mccluskey/index.ht
   [X] work with numbers and not with strings (convert_miniterms_to_numbers, line 804; convert_numbers_to_miniterms, line 817; output_truth_table, line 1218);
   [X] Fix count and time left (put time in seconds and not in count);
   [X] Put time left during compress;
-  [] Resolver problemas com fórmula linha 1023 a fim de realizar recursividade;
-  [] Colocar recursividade, colocar threads e passar funções para a GPU ao mesmo tempo em relação a algumas funções que demoram muito. Interagir com recursos da GPU, com threads e com recursividade. Para isso acontecer, DEBUG deve estar ativado e deve-se compreender a forma como os dados serão armazenados;
+  [X] Resolver problemas com fórmula linha 1023 a fim de realizar recursividade;
+  [X] Resolver problemas da função transform_content_revert;
+  [X] Resolver problema com um byte a mais durante descompactação (pode ser a recursividade na função big_number (recursive = True), linha 1046). Tem a ver com o fato de não processar uma letra, de retornara junto duas letras antes da conversão (por exemplo, cd) e converter apenas uma só (por exemplo, c = 99);
+  [X] Resolver problema referente à linha 1016 com recursividade e inserção maior de zeros com deslocamento (colocar True para argumento da função na linha 1055 a fim de analisar recursividade);
+  [X] Colocar no algoritmo not cls.THREADS_AMMOUNT == 0 or cls.THREADS_AMMOUNT < cls.THREADS_MAX;
+  [X] Incluir variável de ilimitação de espaço de armazenamento para não haver interrupções no processamento dos dados durante a recursividade, especialmente em relação à função da linha 1701;
+  [] Resolver função da linha 1701 que demonstra ser falível com relação aos bits que são fornecidos:
+  11111111011000010110001001100011011001000000101001100101011001100110011100001010
+  11111111011000000110001001100010011001000000101001100100011001100010011100001010
+                 ^               ^                       ^         ^              
+                16              32                      56        66              
+                                                                                  
+  Provavelmente problema tem a ver com minitermos que não estão sendo utilizados pelo programa.
+  [] Resolver problemas de corrupção de dados (os dados de um arquivo apresentam outros caracteres diferentes daqueles que são originais);
+  [] Resolver caso de acréscimo desnecessário de dados;
+  [] Preparar função Quine-McCluskey para efetuar processamento massivo de informações.
+  [] Colocar recursividade, colocar threads e passar funções para a GPU ao mesmo tempo em relação a algumas funções que demoram muito. Interagir com recursos da GPU, com threads e com recursividade. Para isso acontecer, DEBUG deve estar ativado e deve-se compreender a forma como os dados serão armazenados; Utilizar GPU e threads para realizar operações de maneira mais rápida tanto na compactação como na descompactação;
   [] Fazer com que o programa pergunte se pode utilizar a GPU, os threads e a recursividade a depender do sistema (e de qual dispositivo e módulos estão disponíveis), e verifica quanto de memória principal tem para utilizar 80% do espaço de armazenamento disponível no máximo;
   [] Fazer observações com arquivos binários. Criar e compilar um algoritmo que tem a função de mostrar na tela a mensagem hello world a fim de utilizá-lo como stub para o software Egg Cell compactor;
   [] Save the data (without errors from binary file);
   [] Recover the data from the new file (binary file);
   [] Fix problem 'out of memory' because of big files size;
+  [] Transformar EEG em linha de comando com argumentos para definir se quer recursividade, se quer uso otimizado, se quer que haja impressão na tela, etc, como se fosse um comando no terminal
   [] Comments all the algorithm;
-  [] Utilizar GPU e threads para realizar operações de maneira mais rápida tanto na compactação como na descompactação;
   ## First part completed
   [] Save the data from a directory;
   [] Recover the data from the new file to a directory;
@@ -116,13 +131,18 @@ from os import sys
 from pathlib import Path
 import time
 from functools import reduce
-#from numba import njit
+from numba import njit
+import numba.cuda as cuda
+
 
 CLI_MODE = True
 ALLOW_PROMPT_MESSAGES = True
 ENABLE_TIME_LEFT_APPEAR = True
-DEBUG = True
+DEBUG = False
 PRINT_LONG_TEXT = False
+MORE_INFORMATION_OUTPUT = False
+SHOW_MINITERM_OUTPUT = False
+
 
 def filter_log (num, b):
   if num > 0:
@@ -175,7 +195,7 @@ class TimeLeft:
     else:
       current_timestamp = time.time()
       current_second = int(current_timestamp -self.start_timestamp)
-      print (self.TIME_LEFT.format(int(self.time_left//60), int(self.time_left % 60), self.description), end = '\r')
+      print (self.TIME_LEFT.format(int(current_second//60), int(current_second % 60), self.description), end = '\r')
 
 
 class QuineMcCluskey:
@@ -797,12 +817,17 @@ class EggCellCompactor:
   TIME_LEFT_ASSEMBLY_BOOL_ALG = 'Preparing processing model'
   TIME_LEFT_REDUCE_BITS = 'Bit set for compact'
   TIME_LEFT_BIG_NUMBER = 'Converting data file'
+  TIME_LEFT_REGISTER_DATA = 'Recording data'
   #TIME_LEFT_ALTERNATIVE = '(with time_delay) Bit set: {0}/{4}, percentage: {1}%, time left: {2} minutes e {3} seconds.'
   ZERO = '0'
-  MAX_SIZE = sys.maxsize
-  MAX_FREE_MEMORY = virtual_memory()[1] -virtual_memory()[1]*0.8
-  MAX_RECURSIVE = 1024
+  MAX_SIZE = 2**16 #sys.maxsize
+  #MAX_FREE_MEMORY = virtual_memory()[1] -virtual_memory()[1]*0.8
+  MAX_FREE_MEMORY = 0
+  MAX_RECURSIVE = 0
   NUMBER_RECURSIVE_FUNCTIONS = 0
+  
+  SE = lambda x: (x/(2*0.01))*(abs(x)-abs(x-0.01)+0.01)
+  SE2 = lambda x: (1/(2*0.01))*(abs(x)-abs(x-0.01)+0.01)
 
   ## Getting the user data.
   @classmethod
@@ -914,18 +939,27 @@ class EggCellCompactor:
 #      for j in range(len(data[0][i]))
 #        cursor.executemany (cls.SQL_INSERT_DATA, [data[0][i][j]])
     count_i = 0
-    count_j = 0
     len_package = len (data[0])
+    if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+      print("len_package: ", len_package)
     
+    if ALLOW_PROMPT_MESSAGES and ENABLE_TIME_LEFT_APPEAR and CLI_MODE:
+      timing = TimeLeft(cls.TIME_LEFT_REGISTER_DATA, len_package, True)
+    
+    if DEBUG and ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
+      print("data[0]: ", data[0])
     while count_i < len_package:
       len_miniterms = len(data[0][count_i])
+      count_j = 0
+      if ALLOW_PROMPT_MESSAGES and ENABLE_TIME_LEFT_APPEAR and CLI_MODE:
+          timing.count_time_and_print()
       while count_j < len_miniterms:
-        if DEBUG:
-          if ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
-            print (type(list(data[0][count_i])[count_j]))
-            print (type(list(data[0][count_i])),list(data[0][count_i]))
-            print (type(list(data[0])))
-            print (list(data[0][count_i])[count_j])
+        if DEBUG and ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
+          print ("count_i: ", count_i, "count_j", count_j)
+          print ("type(list(data[0][count_i])[count_j]): ", type(list(data[0][count_i])[count_j]))
+          print ("type(list(data[0][count_i])): ", type(list(data[0][count_i])),"list(data[0][count_i]): ", list(data[0][count_i]))
+          print ("type(list(data[0])): ", type(list(data[0])))
+          print ("list(data[0][count_i])[count_j]: ", list(data[0][count_i])[count_j])    
         cursor.execute (cls.SQL_INSERT_DATA.format(cls.convert_miniterms_to_numbers(list(data[0][count_i])[count_j])))
         #cursor.executemany (cls.SQL_INSERT_DATA, [(count_i, count_j, list(data[0][count_i])[count_j])])
         #cursor.executemany (cls.SQL_INSERT_DATA, [count_i* len_miniterms +count_j+1, count_i, count_j, list(data[0][count_i])[count_j]])
@@ -1009,7 +1043,7 @@ class EggCellCompactor:
     
   @classmethod
   def transform_content (cls, content, total_length):
-    if total_length > 1 and cls.NUMBER_RECURSIVE_FUNCTIONS < cls.MAX_RECURSIVE and virtual_memory()[1] > cls.MAX_FREE_MEMORY:
+    if total_length > 1 and (not cls.MAX_RECURSIVE or cls.NUMBER_RECURSIVE_FUNCTIONS < cls.MAX_RECURSIVE) and (not cls.MAX_FREE_MEMORY or virtual_memory()[1] > cls.MAX_FREE_MEMORY):
       cls.NUMBER_RECURSIVE_FUNCTIONS+=1
       if ALLOW_PROMPT_MESSAGES and DEBUG and CLI_MODE:
         print("TEST content: ", content, "cls.NUMBER_RECURSIVE_FUNCTIONS (up): ", cls.NUMBER_RECURSIVE_FUNCTIONS)
@@ -1019,27 +1053,46 @@ class EggCellCompactor:
         print("TEST 2 content: ", content, "cls.NUMBER_RECURSIVE_FUNCTIONS (up): ", cls.NUMBER_RECURSIVE_FUNCTIONS)
       right = cls.transform_content(content[len(content)//2:], total_length//2)
       cls.NUMBER_RECURSIVE_FUNCTIONS-=1
+      
+      #difference_bits_eight_left = 8-(int(log(left))+1)%8
+      #difference_bits_eight_right = 8-(int(log(right))+1)%8
+      #difference_bits_left = int(2**(3+round(cls.SE(int(log(int(log(left,2)),2))-2)))) -(int(log(left,2))+1)
+      #difference_bits_right = int(2**(3+round(cls.SE(int(log(int(log(right,2)),2))-2)))) -(int(log(right,2))+1)
+      
       if ALLOW_PROMPT_MESSAGES and DEBUG and CLI_MODE:
-        print("TEST cls.NUMBER_RECURSIVE_FUNCTIONS (down) 2: ", cls.NUMBER_RECURSIVE_FUNCTIONS, "left: ", left, "right: ", right, "result: ", left << int(2**(3+log(right,2)//8)) | right, "bin(result): ", bin(left << int(2**(3+log(right,2)//8)) | right))
-      se = lambda x: (x/(2*0.01))*(abs(x)-abs(x-0.01)+0.01)
-      return left << int(2**(3+round(se(int(log(int(log(4294967296,2)),2))-2)))) | right
+        print("TEST cls.NUMBER_RECURSIVE_FUNCTIONS (down) 2: ", cls.NUMBER_RECURSIVE_FUNCTIONS, "left: ", left, "bin(left): ", bin(left), "len(bin(left)): ", len(bin(left)) -2,  "right: ", right, "bin(right): ", bin(right), "len(bin(right)): ", len(bin(right)) -2, "result: ", left << 8*round(len(content)//2) | right, "bin(result): ", bin(left << 8*round(len(content)//2) | right))
+        print("len(content): ", len(content), "len(content)//2: ", len(content)//2, "round(len(content)//2)+2: ", round(len(content)//2), "8*(round(len(content)//2)): ", 8*(round(len(content)//2)), "left << 8*round(len(content)//2) | right: ", left << 8*round(len(content)//2) | right, "bin(left << 8*round(len(content)//2) | right): ", bin(left << 8*round(len(content)//2) | right))
+        #print ("TEST difference bits left: ", difference_bits_left, "difference bits right: ", difference_bits_right, "difference_bits_eight_left: ", difference_bits_eight_left, "difference_bits_eight_right: ", difference_bits_eight_right)
+        #print("TEST cls.NUMBER_RECURSIVE_FUNCTIONS (down) 2: ", cls.NUMBER_RECURSIVE_FUNCTIONS, "left: ", left, "bin(left): ", bin(left), "len(bin(left)): ", len(bin(left)) -2,  "right: ", right, "bin(right): ", bin(right), "len(bin(right)): ", len(bin(right)) -2, "result: ", left << int(2**(3+round(cls.SE(int(log(int(log(right,2)),2))-2)))) | right, "bin(result): ", bin(left << int(2**(3+round(cls.SE(int(log(int(log(right,2)),2))-2)))) | right))
+        
+        #print ("log(right,2): ", log(right,2), "; int(log(right,2)): ",  int(log(right,2)), "; log(int(log(right,2)),2): ", log(int(log(right,2)),2), "; int(log(int(log(right,2)),2)): ", int(log(int(log(right,2)),2)), "; cls.SE(int(log(int(log(right,2)),2))-2): ", cls.SE(int(log(int(log(right,2)),2))-2), "; round(cls.SE(int(log(int(log(right,2)),2))-2)): ", round(cls.SE(int(log(int(log(right,2)),2))-2)), "; 3+round(cls.SE(int(log(int(log(right,2)),2))-2)): ", 3+round(cls.SE(int(log(int(log(right,2)),2))-2)), "; 2**(3+round(cls.SE(int(log(int(log(right,2)),2))-2))): ", 2**(3+round(cls.SE(int(log(int(log(right,2)),2))-2))), "; int(2**(3+round(cls.SE(int(log(int(log(right,2)),2))-2)))): ", int(2**(3+round(cls.SE(int(log(int(log(right,2)),2))-2)))))
+      
+      #return left << (int(2**(3+round(cls.SE(int(log(int(log(right,2)),2))-2)))) -difference_bits_right +round(cls.SE2(difference_bits_right))) | right
+      #return left << ((int(log(right))+1) +round(cls.SE2(difference_bits_right))) | right
+      #return left << (int(log(right))+1 +(8*round(cls.SE2((int(log(right))+1)%8))-(int(log(right))+1)%8)) | right
+      #print("int(log(right))+1: ", int(log(right))+1, "(int(log(right))+1)%8: ", (int(log(right))+1)%8, "(8-(int(log(right))+1)%8): ", (8-(int(log(right))+1)%8), "(int(log(right))+1 +(8-(int(log(right))+1)%8)): ", (int(log(right))+1 +(8-(int(log(right))+1)%8)))
+      #return left << (int(log(right))+1 +difference_bits_eight) | right
+      return left << 8*ceil(len(content)/2) | right
+      
     else:
       result = 0
       count = 0
       if ALLOW_PROMPT_MESSAGES and DEBUG and CLI_MODE:
         print("TEST 3 content: ", content, "cls.NUMBER_RECURSIVE_FUNCTIONS: ", cls.NUMBER_RECURSIVE_FUNCTIONS)
-      while count < total_length:
+      while count < total_length or count < len(content):
         character = content[count]
         result = result<<8 | ord(character)
         count+=1
+        if ALLOW_PROMPT_MESSAGES and DEBUG and CLI_MODE:
+          print("TEST 4 result: ", result, "cls.NUMBER_RECURSIVE_FUNCTIONS: ", cls.NUMBER_RECURSIVE_FUNCTIONS)
       cls.NUMBER_RECURSIVE_FUNCTIONS-=1
       if ALLOW_PROMPT_MESSAGES and DEBUG and CLI_MODE:
-        print("TEST 4 result: ", result, "cls.NUMBER_RECURSIVE_FUNCTIONS (down): ", cls.NUMBER_RECURSIVE_FUNCTIONS)
+        print("TEST 5 result: ", result, "cls.NUMBER_RECURSIVE_FUNCTIONS (down): ", cls.NUMBER_RECURSIVE_FUNCTIONS)
       return result
   
   ## Find the number resulted from the user file content.
-  @classmethod  
-  def big_number (cls, filename, recursive = True):      
+  @classmethod
+  def big_number (cls, filename, recursive = False):
     BASE = 2
     is_binary = False
     ## Open and read the user file.
@@ -1127,23 +1180,84 @@ class EggCellCompactor:
       print(cls.MESSAGE_FILE_CREATION_COMPL)
   '''
   
-  @classmethod  
-  def revert_big_number (cls, big_number, filename, is_binary):
+  @classmethod
+  def transform_content_revert (cls, content, total_length):
+    if total_length > 8 and (not cls.MAX_RECURSIVE or cls.NUMBER_RECURSIVE_FUNCTIONS < cls.MAX_RECURSIVE) and (not cls.MAX_FREE_MEMORY or virtual_memory()[1] > cls.MAX_FREE_MEMORY):
+      cls.NUMBER_RECURSIVE_FUNCTIONS+=1
+      difference_bits = int(2**(3+round(cls.SE(int(log(int(log(content,2)),2))-2)))) -(int(log(content,2))+1)
+      if ALLOW_PROMPT_MESSAGES and DEBUG and CLI_MODE:
+        print("TEST content: ", content, "bin(content): ",bin(content), "int(log(content,2))+1:", int(log(content,2))+1, "(int(log(content,2))+1 % 2) == 0: ", (int(log(content,2))+1) % 2 == 0, "difference_bits: ", difference_bits, "cls.NUMBER_RECURSIVE_FUNCTIONS (up): ", cls.NUMBER_RECURSIVE_FUNCTIONS)
+      left = cls.transform_content_revert((content>>((int(log(content,2))+1)//2)) & ((1<<((int(log(content,2))+1)//2))-1) if difference_bits == 0 else (content>>(2**(int(log(((int(log(content,2))+1)//2),2))+1))) & ((1<<((int(log(content,2))+1)//2))-1), total_length//2)
+      #left = cls.transform_content_revert((content>>((int(log(content,2))+1)//2)) & ((1<<((int(log(content,2))+1)//2))-1) if int(log(content,2))+1 % 2 == 0 else (content>>((int(log(content,2))+1)//2)) & ((1<<((int(log(content,2))+1)//2 +1))-1), total_length//2)
+      cls.NUMBER_RECURSIVE_FUNCTIONS+=1
+      if ALLOW_PROMPT_MESSAGES and DEBUG and CLI_MODE:
+        print("TEST 2 content: ", content, "bin(content): ",bin(content), "int(log(content,2))+1:", int(log(content,2))+1, "(int(log(content,2))+1) % 2 == 0: ", (int(log(content,2))+1) % 2 == 0, "content & ((1<<((int(log(content,2))+1)//2))-1):", content & ((1<<((int(log(content,2))+1)//2))-1), "content & ((1<<(((int(log(content,2))+1)//2)+1))-1):", content & ((1<<(((int(log(content,2))+1)//2)+1))-1), "difference_bits: ", difference_bits, "cls.NUMBER_RECURSIVE_FUNCTIONS (up): ", cls.NUMBER_RECURSIVE_FUNCTIONS)
+      right = cls.transform_content_revert(content & ((1<<((int(log(content,2))+1)//2))-1) if difference_bits == 0 else content & ((1<<(2**(int(log(((int(log(content,2))+1)//2),2))+1)))-1), total_length//2)
+      #right = cls.transform_content_revert(content & ((1<<((int(log(content,2))+1)//2))-1) if difference_bits == 0 else content & ((1<<(((int(log(content,2))+1)//2)+difference_bits))-1), total_length//2)
+      #right = cls.transform_content_revert(content & ((1<<((int(log(content,2))+1)//2))-1) if (int(log(content,2))+1) % 2 == 0 else content & ((1<<((int(log(content,2))+1)//2 +1))-1), total_length//2)
+      cls.NUMBER_RECURSIVE_FUNCTIONS-=1
+      if ALLOW_PROMPT_MESSAGES and DEBUG and CLI_MODE:
+        print("TEST cls.NUMBER_RECURSIVE_FUNCTIONS (down) 2: ", cls.NUMBER_RECURSIVE_FUNCTIONS, "left: ", left, "right: ", right)
+      return left + right
+    
+    else:
+      if ALLOW_PROMPT_MESSAGES and DEBUG and CLI_MODE:
+        print("TEST 3 content: ", content, "bin(content): ",  bin(content), "cls.NUMBER_RECURSIVE_FUNCTIONS: ", cls.NUMBER_RECURSIVE_FUNCTIONS)
+      big_number_str = str() ## We will create a new variable to store strings with our number reduction.
+      number_reduce = content ## The large number is assigned to the number_reduce variable to be reduced.
+      while number_reduce > 1:
+        char = number_reduce & cls.MASK 
+        big_number_str = chr(char) + big_number_str
+        number_reduce >>= 8
+        if DEBUG and ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
+          print ("chr(char): ", chr(char), "number_reduce:", number_reduce, "bin: ", bin(number_reduce))
+          print("mask: ", cls.MASK, "big_number_str: ", big_number_str, "char: ", char)
+      cls.NUMBER_RECURSIVE_FUNCTIONS-=1
+      return big_number_str
   
+  @classmethod  
+  ## Let's convert the number into strings via this function:
+  def revert_big_number (cls, big_number, filename, is_binary, recursive = False):
     if ALLOW_PROMPT_MESSAGES and CLI_MODE:
       print(cls.MESSAGE_BIG_NUMBER_REVERT_FILE)
     
-    big_number_str = str()
-    number_reduce = big_number
+    if not recursive:
+      big_number_str = str() ## We will create a new variable to store strings with our number reduction.
+      number_reduce = big_number ## The large number is assigned to the number_reduce variable to be reduced.
+      if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+        print ("number_reduce:", number_reduce, "bin: ", bin(number_reduce), 'length: ', len(bin(number_reduce))-2)
+      while number_reduce > 1:
+        char = number_reduce & cls.MASK 
+        big_number_str = chr(char) + big_number_str
+        number_reduce >>= 8
+        if DEBUG and ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
+          print ("number_reduce:", number_reduce, "bin: ", bin(number_reduce))
+          print("mask: ", cls.MASK, "big_number_str: ", big_number_str, "char: ", char)
+    else:
+      big_number_str2 = str() ## We will create a new variable to store strings with our number reduction.
+      number_reduce = big_number ## The large number is assigned to the number_reduce variable to be reduced.
+      count = int(log(big_number,2))+1
+      if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+        print ("number_reduce:", number_reduce, "bin: ", bin(number_reduce), 'length: ', len(bin(number_reduce))-2)
+      while number_reduce > 1 and log(count,2) % 2 != 0:
+        char = number_reduce & cls.MASK 
+        big_number_str2 = chr(char) + big_number_str2
+        number_reduce >>= 8
+        count-= 8
+        if DEBUG and ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
+          print ("number_reduce:", number_reduce, "bin: ", bin(number_reduce))
+          print("mask: ", cls.MASK, "big_number_str: ", big_number_str2, "char: ", char)
+      cls.NUMBER_RECURSIVE_FUNCTIONS = 1
+      if number_reduce > 1:
+        big_number_str = cls.transform_content_revert (number_reduce, int(log(number_reduce, 2))+1)
+        if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+          print ("big_number_str: ", big_number_str, "big_number_str2: ", big_number_str2)
+        big_number_str += big_number_str2
+      else:
+        big_number_str = big_number_str2
+      del big_number_str2
     if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
-      print ("number_reduce:", number_reduce, "bin: ", bin(number_reduce), 'length: ', len(bin(number_reduce))-2)
-    while number_reduce > 1:
-      char = number_reduce & cls.MASK 
-      big_number_str = chr(char) + big_number_str
-      number_reduce >>= 8
-      if DEBUG and ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
-        print ("number_reduce:", number_reduce, "bin: ", bin(number_reduce))
-        print("mask: ", cls.MASK, "big_number_str: ", big_number_str, "char: ", char)
+      print ("result: ", big_number_str)
     
     big_number_str = big_number_str[1:]
     ## Open and write the new file.
@@ -1216,19 +1330,42 @@ class EggCellCompactor:
     #current_pos = current_len if current_len < cls.MAX_SIZE else cls.MAX_SIZE
     
     ## Now we need to know how many bits are dontcares. We will calculate the complement to determine what those bits would be.
-    amount_bits_number = int(log(number,2)) +1
-    complement = 2**(int(log (amount_bits_number, 2))+1) ## We will use the size of the bit stream to calculate the amount of doncares for this purpose. Thus, the difference between the largest exponential number in base 2 will be the limit, and the size of the bit stream will be put at the beginning of the dontcares bit stream.
-    final_num = amount_bits_number % (cls.MAX_SIZE+1) ## Here we will filter all values above cls.MAX_SIZE, which would be the maximum limit for creating lists in Python according to the bit width of the hardware word or instruction.
+    #amount_bits_number = int(log(number,2)) +1 ## Here we will calculate the number of bits that belong to the given data
+    #complement = 2**(int(log (amount_bits_number, 2))+1) ## We will use the size of the bit stream to calculate the amount of doncares for this purpose. Thus, the difference between the largest exponential number in base 2 will be the limit, and the size of the bit stream will be put at the beginning of the dontcares bit stream.
      ## Since the bitlist is in packets, each intermediate packet is complete and need not count dontcares, but the last packet, as well as a single bitstream packet, can have dontcares bits.
-    dontcares = list(range(final_num, complement if complement -1 <= cls.MAX_SIZE else cls.MAX_SIZE+1)) ## Here we will create a list with all the dontcares bits
-    #result_dontcares.append(dontcares)
+    #dontcares = list(range(amount_bits_number, complement)) ## Here we will create a list with all the dontcares bits
     if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
-      print ("result_ones: ", result_ones,"dontcares: ", dontcares, "type(result_ones): ", type(result_ones), "type(dontcares): ", type(dontcares))
-    result = [qm.simplify(i, [] if (result_ones.index(i) +1 != len(result_ones)) else dontcares) for i in result_ones[:-1 if len(result_ones) > 1 else 1]] ## We will return the result of simplifying the bitstream with all boolean functions in a list.
+        print ("result_ones: ", result_ones, "type(result_ones): ", type(result_ones))
+    result = list()
+    last_num = result_ones[0][0]
+    ## Since the bitlist is in packets, each intermediate packet is complete and need not count dontcares, but the last packet, as well as a single bitstream packet, can have dontcares bits.
+    if False: #log(last_num,2) != int(log(last_num,2)):
+      amount_bits_number = last_num +1 ## Here we will calculate the number of bits that belong to the given data
+      complement = 2**(int(log (last_num, 2))+1) ## We will use the size of the bit stream to calculate the amount of doncares for this purpose. Thus, the difference between the largest exponential number in base 2 will be the limit, and the size of the bit stream will be put at the beginning of the dontcares bit stream.
+      dontcares = list(range(amount_bits_number, complement)) ## Here we will create a list with all the dontcares bits
+    else:
+      dontcares = []
+      
+    #if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+    #print ("last_num: ", last_num, "amount_bits_number: ", amount_bits_number, "complement: ", complement, "dontcares: ", dontcares, "type(dontcares): ", type(dontcares))
+      
+    for i in result_ones:
+        #amount_bits_number = i[0] +1 ## Here we will calculate the number of bits that belong to the given data
+        #complement = 2**(int(log (i[0], 2))+1) ## We will use the size of the bit stream to calculate the amount of doncares for this purpose. Thus, the difference between the largest exponential number in base 2 will be the limit, and the size of the bit stream will be put at the beginning of the dontcares bit stream.
+        ## Since the bitlist is in packets, each intermediate packet is complete and need not count dontcares, but the last packet, as well as a single bitstream packet, can have dontcares bits.
+        #dontcares = list(range(amount_bits_number, complement)) ## Here we will create a list with all the dontcares bits
+        #if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+          #print ("amount_bits_number: ", amount_bits_number, "complement: ", complement, "dontcares: ", dontcares, "type(dontcares): ", type(dontcares))
+        expression = qm.simplify(i, dontcares) #if (result_ones.index(i) != 0) else dontcares)  ## We will return the result of simplifying the bitstream with all boolean functions in a list.
+        result.append(expression)
+        if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+            print("Expression: {0}".format(expression)) 
     if ALLOW_PROMPT_MESSAGES and CLI_MODE:
       print(cls.MESSAGE_QUINE_MCCLUSKEY_COMPL)
       print(cls.MESSAGE_COMPRESS_OPERATION_COMPL)
-      
+    
+    if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+        print ("result: "+str(result))
     return result 
   
   ## Compact the file or the directory (main function).
@@ -1251,7 +1388,7 @@ class EggCellCompactor:
       ## The binary sequence must be simplified with the Quine-McCluskey algorithm.
       boolean_functions = cls.boolean_algebra(number)
       if DEBUG and ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
-          print(boolean_functions[0])
+          print("boolean_functions[0]: ", boolean_functions[0])
       ## Register all the changes in a data bank.
       con = cls.create_data_bank(filename_modified) ## Starting the data bank.
       cls.register_data_bank([boolean_functions, filename, filesize +8, is_binary], con) ## Filesize variable must need have a sum operation with eight because the character with binary number 255 was inserted.
@@ -1312,256 +1449,198 @@ class EggCellCompactor:
 
   '''
   @classmethod
-  def output_truth_table (cls, boolean_functions, filesize):
-    if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-      print(cls.MESSAGE_DECOMPRESSION)
-    ## O objetivo com esta função é conseguir a saída de uma tabela verdade.
-    ## Dentro de cada variável do vetor ou da lista boolean_functions existem tuplas cujos valores são:
-    ## LEVEL_ID, package_number, pos_miniterm_pack, miniterm
-    ## Exemplo de entrada:
-    ## [(1, 0, 0, '-1100--01-111'), (2, 0, 1, '-0-1-1-100111'), (3, 0, 2, '-110101010-0-'), (4, 0, 3, '-1010-000000-'), (5, 0, 4, '-0001111100-0')]
-    
-    first_time = True
-    mini_lenght = 0
-    miniterm_compiled = '('
-    current_var = ''
-    #total_amount_variables = 0  
-    if ALLOW_PROMPT_MESSAGES and ENABLE_TIME_LEFT_APPEAR and CLI_MODE:
-      timing = TimeLeft(cls.TIME_LEFT_ASSEMBLY_BOOL_ALG,len(boolean_functions), True)
-    
-    if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE and PRINT_LONG_TEXT:
-          print("raw boolean function: ", boolean_functions)
-    
-    if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-      print(cls.MESSAGE_SET_BOOLEAN_ALGEBRA)
-    
-    for i in boolean_functions:
-      ## Primeiro devemos recolher cada um dos minitermos e substituir cada caractere pela sua devida variável.
-      miniterm_q = cls.convert_numbers_to_miniterms(i[0])
-      if first_time:
-        mini_lenght = len(miniterm_q)
-      if DEBUG:
-        if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-          print("miniterm_q: ", miniterm_q)  
-      count = 0
-      var_used = list()
-      for j in miniterm_q:
-        current_var = cls.define_letters_for_integers(mini_lenght -count -1)
-        if DEBUG:
-          if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-            print ("current_var: ", current_var, "count: ", count)
-        if j == '1':
-          if DEBUG:
-            if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-              print ("current_var ", current_var, "entered by 1")
-          miniterm_compiled += '{0} and '.format(current_var)
-          var_used.append(current_var)
-        elif j == '0':
-          if DEBUG:
-              if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-                print ("current_var ", current_var, "entered by 0")
-          miniterm_compiled += '({0} -1)*(-1) and '.format(current_var)
-          var_used.append(current_var)
-        #elif j == '-': 
-        #continue
-        count+=1
-        #total_amount_variables +=1
-      miniterm_compiled = miniterm_compiled[:-5]+') or ('
-      if DEBUG:
-        if ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
-          print ("miniterm_compiled", miniterm_compiled)
-          
-      if ALLOW_PROMPT_MESSAGES and ENABLE_TIME_LEFT_APPEAR and CLI_MODE:
-        timing.count_time_and_print()
-        #if DEBUG:
-        #print ("timestamp_differ: ", timestamp_differ, "time_left: ", time_left, "current_timestamp: ", current_timestamp, "start_timestamp: ",start_timestamp, "current_percentage: ", current_percentage, "previous_percentage: ", previous_percentage,  "previous_timestamp: ", previous_timestamp, "current_second: ", current_second, "previous_second: ", previous_second, "current_second != previous_second: ", current_second != previous_second)
-        
-        
-    miniterm_compiled = miniterm_compiled[:-5]
-    if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-      print(cls.MESSAGE_SET_BOOLEAN_ALGEBRA_COMPL)
-    
-    if DEBUG:
-      if ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
-        print ("miniterm_compiled completed: ", miniterm_compiled)
-    ## Agora utilizaremos todas as variáveis para realizar a operação binária de uma tabela verdade a fim de extrair a saída:
-    count = 0
+  def thuth_table_recursive_deeper2(cls, boolean_functions, count):
+    mask = 3
     count2 = 0
-    SE = lambda x: (1/0.02)*(abs(x+1)-abs(x+0.99)+0.01)
-    big_number_result = 1
-    if ALLOW_PROMPT_MESSAGES and ENABLE_TIME_LEFT_APPEAR and CLI_MODE:
-      timing2 = TimeLeft(cls.TIME_LEFT, filesize, True)
-    
-    while count < filesize:
-      boolean_algebra = miniterm_compiled
-      bin_num = count
-      while count2 < mini_lenght:
-        current_var = cls.define_letters_for_integers(mini_lenght -count2 -1)
-        current_bit = round(SE(bin_num-2**(mini_lenght-count2 -1)))
-        boolean_algebra = boolean_algebra.replace(current_var, str(current_bit))
-        if DEBUG:
-          if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-            print ("filesize: ", filesize, "mini_lenght: ", mini_lenght, ", count2: ",count2, ", mini_lenght -count2: ", mini_lenght -count2, ", 2**(mini_lenght-count2): ", 2**(mini_lenght-count2))
-            print ("current_var : ", current_var, ", current_bit (round(SE(bin_num-2**(mini_lenght-count2))): ", current_bit, ", bin_num (count): ", bin_num)
-            if PRINT_LONG_TEXT and CLI_MODE:
-              print("boolean_algebra replacing: ",boolean_algebra)
-        if current_bit:
-          bin_num-= 2**(mini_lenght-count2-1)
-        count2+=1
-      if DEBUG:
-        if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-          if PRINT_LONG_TEXT:
-            print("boolean_algebra completed: ",boolean_algebra)
-      result = eval(boolean_algebra)
-      if DEBUG:
-        if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-          print ("TEST result: ", result)
-      big_number_result = big_number_result<<1 | result
-      count2 = 0
-      count+=1
-      
-      if ALLOW_PROMPT_MESSAGES and ENABLE_TIME_LEFT_APPEAR and CLI_MODE:
-        timing2.count_time_and_print()
-        
-        #if DEBUG:
-        #print ( "time_left: ", time_left, "current_timestamp: ", current_timestamp, "start_timestamp: ",start_timestamp, "previous_timestamp: ", previous_timestamp, "current_second: ", current_second, "previous_second: ", previous_second)
-          
-    if DEBUG and ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
-        print ('big_number_result',big_number_result)
-        
-    if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-      print(cls.MESSAGE_DECOMPRESSION_COMPLETED)
-    return big_number_result
+    mini_lenght = int(log (boolean_functions[0][0],2))+1
+    bit_count = filesize
+    result = 1
+    final_result = cls.thuth_table_recursive_deeper2(boolean_functions, count -1)
+    #while count2 < mini_lenght//2:
+    bits = miniterm_q & mask
+    if bits != cls.BOOLEAN_VARIABLE_NOT_INCLUDED:
+      if bits == cls.BOOLEAN_VARIABLE_REPRESENTION:
+        if bit_count & 1 == 1:
+          result &= 1
+        else:
+          result &= 0
+      elif bits == cls.NEGATE_BOOLEAN_VARIABLE_REPRESENTION:
+        if bit_count & 1 == 0:
+          result &= 1 
+        else: 
+          result &= 0
+    miniterm_q>>=2
+    bit_count>>=1
+    count2+=1
+    return result
+  '''
+  '''
+    mask = 3
+    count2 = 0
+    mini_lenght = int(log (boolean_functions[0][0],2))+1
+    bit_count = filesize
+    result = 1
+      while count2 < mini_lenght//2:
+        bits = miniterm_q & mask
+      if bits != cls.BOOLEAN_VARIABLE_NOT_INCLUDED:
+        if bits == cls.BOOLEAN_VARIABLE_REPRESENTION:
+          if bit_count & 1 == 1:
+            result &= 1
+          else:
+            result &= 0
+        elif bits == cls.NEGATE_BOOLEAN_VARIABLE_REPRESENTION:
+          if bit_count & 1 == 0:
+            result &= 1 
+          else: 
+            result &= 0
+      miniterm_q>>=2
+      bit_count>>=1
+      count2+=1
+    #result_or |= result
+    return result
   '''
   
   '''
   @classmethod
-  def output_truth_table (cls, boolean_functions, filesize):
-    if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-      print(cls.MESSAGE_DECOMPRESSION)
-    ## O objetivo com esta função é conseguir a saída de uma tabela verdade.
-    ## Dentro de cada variável do vetor ou da lista boolean_functions existem tuplas cujos valores são:
-    ## LEVEL_ID, package_number, pos_miniterm_pack, miniterm
-    ## Exemplo de entrada:
-    ## [(1, 0, 0, '-1100--01-111'), (2, 0, 1, '-0-1-1-100111'), (3, 0, 2, '-110101010-0-'), (4, 0, 3, '-1010-000000-'), (5, 0, 4, '-0001111100-0')]
-    
-    first_time = True
-    mini_lenght = 0
-    miniterm_compiled = '('
-    current_var = ''
-    #total_amount_variables = 0  
-    if ALLOW_PROMPT_MESSAGES and ENABLE_TIME_LEFT_APPEAR and CLI_MODE:
-      timing = TimeLeft(cls.TIME_LEFT_ASSEMBLY_BOOL_ALG,len(boolean_functions), True)
-    
-    if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
-      print('filesize: ', filesize)
-      if PRINT_LONG_TEXT:
-        print("raw boolean function: ", boolean_functions)
-    
-    if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-      print(cls.MESSAGE_SET_BOOLEAN_ALGEBRA)
-    
-    for i in boolean_functions:
-      ## Primeiro devemos recolher cada um dos minitermos e substituir cada caractere pela sua devida variável.
-      miniterm_q = cls.convert_numbers_to_miniterms(i[0])
-      if first_time:
-        mini_lenght = len(miniterm_q)
-      if DEBUG:
-        if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-          print("miniterm_q: ", miniterm_q)  
-      count = 0
-      var_used = list()
-      for j in miniterm_q:
-        current_var = cls.define_letters_for_integers(mini_lenght -count -1)
-        if DEBUG:
-          if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-            print ("current_var: ", current_var, "count: ", count)
-        if j == '1':
-          if DEBUG:
-            if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-              print ("current_var ", current_var, "entered by 1")
-          miniterm_compiled += '{0} and '.format(current_var)
-          var_used.append(current_var)
-        elif j == '0':
-          if DEBUG:
-              if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-                print ("current_var ", current_var, "entered by 0")
-          miniterm_compiled += '({0} -1)*(-1) and '.format(current_var)
-          var_used.append(current_var)
-        #elif j == '-': 
-        #continue
-        count+=1
-        #total_amount_variables +=1
-      miniterm_compiled = miniterm_compiled[:-5]+') or ('
-      if DEBUG:
-        if ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
-          print ("miniterm_compiled", miniterm_compiled)
-          
-      if ALLOW_PROMPT_MESSAGES and ENABLE_TIME_LEFT_APPEAR and CLI_MODE:
-        timing.count_time_and_print()
-        #if DEBUG:
-        #print ("timestamp_differ: ", timestamp_differ, "time_left: ", time_left, "current_timestamp: ", current_timestamp, "start_timestamp: ",start_timestamp, "current_percentage: ", current_percentage, "previous_percentage: ", previous_percentage,  "previous_timestamp: ", previous_timestamp, "current_second: ", current_second, "previous_second: ", previous_second, "current_second != previous_second: ", current_second != previous_second)
-        
-        
-    miniterm_compiled = miniterm_compiled[:-5]
-    if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-      print(cls.MESSAGE_SET_BOOLEAN_ALGEBRA_COMPL)
-    
-    if DEBUG:
-      if ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
-        print ("miniterm_compiled completed: ", miniterm_compiled)
-    ## Agora utilizaremos todas as variáveis para realizar a operação binária de uma tabela verdade a fim de extrair a saída:
-    count = 0
-    count2 = 0
-    SE = lambda x: (1/0.02)*(abs(x+1)-abs(x+0.99)+0.01)
-    big_number_result = 1
-    if ALLOW_PROMPT_MESSAGES and ENABLE_TIME_LEFT_APPEAR and CLI_MODE:
-      timing2 = TimeLeft(cls.TIME_LEFT, filesize, True)
-    
-    while count < filesize:
-      boolean_algebra = miniterm_compiled
-      bin_num = count
-      while count2 < mini_lenght:
-        current_var = cls.define_letters_for_integers(mini_lenght -count2 -1)
-        current_bit = round(SE(bin_num-2**(mini_lenght-count2 -1)))
-        boolean_algebra = boolean_algebra.replace(current_var, str(current_bit))
-        if DEBUG:
-          if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-            print ("filesize: ", filesize, "mini_lenght: ", mini_lenght, ", count2: ",count2, ", mini_lenght -count2: ", mini_lenght -count2, ", 2**(mini_lenght-count2): ", 2**(mini_lenght-count2))
-            print ("current_var : ", current_var, ", current_bit (round(SE(bin_num-2**(mini_lenght-count2))): ", current_bit, ", bin_num (count): ", bin_num)
-            if PRINT_LONG_TEXT and CLI_MODE:
-              print("boolean_algebra replacing: ",boolean_algebra)
-        if current_bit:
-          bin_num-= 2**(mini_lenght-count2-1)
-        count2+=1
-      if DEBUG:
-        if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-          if PRINT_LONG_TEXT:
-            print("boolean_algebra completed: ",boolean_algebra)
-      result = eval(boolean_algebra)
-      if DEBUG:
-        if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-          print ("TEST result: ", result)
-      big_number_result = big_number_result<<1 | result
+  def thuth_table_recursive_deeper(cls, boolean_functions, filesize, total_length):
+    if total_length > 1 and (not cls.MAX_RECURSIVE or cls.NUMBER_RECURSIVE_FUNCTIONS < cls.MAX_RECURSIVE) and (not cls.MAX_FREE_MEMORY or virtual_memory()[1] > cls.MAX_FREE_MEMORY):
+      cls.NUMBER_RECURSIVE_FUNCTIONS+=1
+      if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+        print("1705 TEST 1 filesize: {0}, total_length: {1} (thuth_table_recursive_deeper)".format(filesize, total_length))
+      left = cls.thuth_table_recursive_deeper(boolean_functions[:len(boolean_functions)//2], filesize, total_length//2)
+      cls.NUMBER_RECURSIVE_FUNCTIONS+=1
+      right = cls.thuth_table_recursive_deeper(boolean_functions[len(boolean_functions)//2:], filesize, total_length//2)
+      cls.NUMBER_RECURSIVE_FUNCTIONS-=1
+      #return left << ceil(len(boolean_functions)/2) | right
+      return left | right
+    else:
+      if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+        print("1714 TEST 2 filesize: {0}, total_length: {1} (thuth_table_recursive_deeper)".format(filesize, total_length))
+      mask = 3
       count2 = 0
-      count+=1
+      mini_lenght = int(log (boolean_functions[0][0],2))+1
+      bit_count = filesize
+      result = 1
+      result_or = 0
+      for i in boolean_functions:
+        miniterm_q = i[0]
+        while count2 < mini_lenght//2:
+          bits = miniterm_q & mask
+          if bits != cls.BOOLEAN_VARIABLE_NOT_INCLUDED:
+            if bits == cls.BOOLEAN_VARIABLE_REPRESENTION:
+              if bit_count & 1 == 1:
+                result &= 1
+              else:
+                result &= 0
+            elif bits == cls.NEGATE_BOOLEAN_VARIABLE_REPRESENTION:
+              if bit_count & 1 == 0:
+                result &= 1 
+              else: 
+                result &= 0
+          miniterm_q>>=2
+          bit_count>>=1
+          count2+=1
+          print("1745 TEST 3 miniterm: {0}, bin(miniterm_q): {4}, bit_count: {1}, bin(bit_count): {5}, count2: {2}, result: {3} (thuth_table_recursive_deeper).".format(miniterm_q, bit_count, count2, result, bin(miniterm_q), bin(bit_count)))
+        result_or |= result
+        if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+          print("1747 TEST 4 result_or: {0}, miniterm: {1} (thuth_table_recursive_deeper).".format(result_or, miniterm_q))
+      return result_or
       
-      if ALLOW_PROMPT_MESSAGES and ENABLE_TIME_LEFT_APPEAR and CLI_MODE:
-        timing2.count_time_and_print()
-        
-    if DEBUG and ALLOW_PROMPT_MESSAGES and PRINT_LONG_TEXT and CLI_MODE:
-        print ('big_number_result',big_number_result)
-        
-    if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-      print(cls.MESSAGE_DECOMPRESSION_COMPLETED)
-    return big_number_result
-    
-  ''' 
+      
+      
+      mask = 3
+      mini_lenght = int(log (boolean_functions[0][0],2))+1
+      count = 0
+      big_number_result = 0
+      while count < filesize:
+        result_or = 0
+        for i in boolean_functions:
+          ## Primeiro devemos recolher cada um dos minitermos e substituir cada caractere pela sua devida variável.
+          miniterm_q = i[0]
+          count2 = 0
+          bit_count = count
+          result = 1
+          while count2 < mini_lenght//2:
+            bits = miniterm_q & mask
+            if bits != cls.BOOLEAN_VARIABLE_NOT_INCLUDED:
+              if bits == cls.BOOLEAN_VARIABLE_REPRESENTION:
+                if bit_count & 1 == 1:
+                  result &= 1
+                else:
+                  result &= 0
+              elif bits == cls.NEGATE_BOOLEAN_VARIABLE_REPRESENTION:
+                if bit_count & 1 == 0:
+                  result &= 1 
+                else: 
+                  result &= 0
+            miniterm_q>>=2
+            bit_count>>=1
+            count2+=1
+          result_or |= result
+        count+=1
+        big_number_result = big_number_result<<1 | result_or
+      return big_number_result
+      '''
+
+  '''
+  @classmethod
+  def truth_table_recursive (cls,boolean_functions, filesize):
+    if filesize > 1 and (not cls.MAX_RECURSIVE or cls.NUMBER_RECURSIVE_FUNCTIONS < cls.MAX_RECURSIVE) and (not cls.MAX_FREE_MEMORY or virtual_memory()[1] > cls.MAX_FREE_MEMORY):
+      cls.NUMBER_RECURSIVE_FUNCTIONS+=1
+      big_number_result = cls.truth_table_recursive(boolean_functions, filesize -1)
+      partial_result = cls.thuth_table_recursive_deeper(boolean_functions, filesize -1,len(boolean_functions))
+      if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+        print("1792 TEST 1 partial_result: {0}, big_number_result: {1}, bin(big_number_result): {2}, filesize: {3} (truth_table_recursive; exiting from thuth_table_recursive_deeper).".format(partial_result, big_number_result, bin(big_number_result), filesize))
+      big_number_result = big_number_result<<(1) | partial_result
+      if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+        print("1795 TEST 2 big_number_result: {0} (truth_table_recursive).".format(big_number_result))
+      #big_number_result = big_number_result<<(int(log(partial_result))+1) |partial_result
+      cls.NUMBER_RECURSIVE_FUNCTIONS-=1
+      return big_number_result
+    elif (not cls.MAX_RECURSIVE or cls.NUMBER_RECURSIVE_FUNCTIONS < cls.MAX_RECURSIVE) and (not cls.MAX_FREE_MEMORY or virtual_memory()[1] > cls.MAX_FREE_MEMORY):
+      if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+        print ("1788 TEST 3 FIRST! Filesize: {0} (truth_table_recursive).".format(filesize))
+      return cls.thuth_table_recursive_deeper(boolean_functions, filesize, len(boolean_functions))
+    else:
+      if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+        print ("TEST 4 ENTER HERE!!! (truth_table_recursive)")
+      mask = 3
+      mini_lenght = int(log (boolean_functions[0][0],2))+1
+      count = 0
+      big_number_result = 0
+      while count < filesize:
+        result_or = 0
+        for i in boolean_functions:
+          ## Primeiro devemos recolher cada um dos minitermos e substituir cada caractere pela sua devida variável.
+          miniterm_q = i[0]
+          count2 = 0
+          bit_count = count
+          result = 1
+          while count2 < mini_lenght//2:
+            bits = miniterm_q & mask
+            if bits != cls.BOOLEAN_VARIABLE_NOT_INCLUDED:
+              if bits == cls.BOOLEAN_VARIABLE_REPRESENTION:
+                if bit_count & 1 == 1:
+                  result &= 1
+                else:
+                  result &= 0
+              elif bits == cls.NEGATE_BOOLEAN_VARIABLE_REPRESENTION:
+                if bit_count & 1 == 0:
+                  result &= 1 
+                else: 
+                  result &= 0
+            miniterm_q>>=2
+            bit_count>>=1
+            count2+=1
+          result_or |= result
+        count+=1
+        big_number_result = big_number_result<<1 | result_or
+      return big_number_result
+  '''
   
-  
+  @classmethod
   #@njit(parallel = True)
-  @classmethod
-  def output_truth_table (cls,boolean_functions, filesize):
+  def output_truth_table (cls,boolean_functions, filesize): #, recursive = False):
     #if ALLOW_PROMPT_MESSAGES and CLI_MODE:
     #print(cls.MESSAGE_DECOMPRESSION)
     ## O objetivo com esta função é conseguir a saída de uma tabela verdade.
@@ -1569,62 +1648,71 @@ class EggCellCompactor:
     ## LEVEL_ID, package_number, pos_miniterm_pack, miniterm
     ## Exemplo de entrada:
     ## [(1, 0, 0, '-1100--01-111'), (2, 0, 1, '-0-1-1-100111'), (3, 0, 2, '-110101010-0-'), (4, 0, 3, '-1010-000000-'), (5, 0, 4, '-0001111100-0')]
-    
-    if ALLOW_PROMPT_MESSAGES and ENABLE_TIME_LEFT_APPEAR and CLI_MODE:
-      timing = TimeLeft(cls.TIME_LEFT_ASSEMBLY_BOOL_ALG,filesize, True)
-    mask = 3
-    mini_lenght = int(log (boolean_functions[0][0],2))+1
-    count = 0
-    big_number_result = 0
-    while count < filesize:
-      result_or = 0
-      for i in boolean_functions:
-        ## Primeiro devemos recolher cada um dos minitermos e substituir cada caractere pela sua devida variável.
-        miniterm_q = i[0]
-        count2 = 0
-        bit_count = count
-        result = 1
-        if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
-          print("miniterm:", miniterm_q, "bin: ", bin(miniterm_q))
-        while count2 < mini_lenght//2:
-          bits = miniterm_q & mask
-          if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
-            print ("({0}/{1}) processed, ".format(count2, mini_lenght//2), "teste0, bits: ", bits, "count:", count)
-          if bits != cls.BOOLEAN_VARIABLE_NOT_INCLUDED:
-            if bits == cls.BOOLEAN_VARIABLE_REPRESENTION:
-              if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
-                print("teste1: ", bits, "bit_count & 1 == 1", bit_count & 1 == 1)
-              if bit_count & 1 == 1:
-                result &= 1
-              else:
-                result &= 0
-            elif bits == cls.NEGATE_BOOLEAN_VARIABLE_REPRESENTION:
-              if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
-                print("teste2", bits,bit_count & 1 == 0)
-              if bit_count & 1 == 0:
-                result &= 1 
-              else: 
-                result &= 0
-            if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
-              print("result!!!", result)
-          miniterm_q>>=2
-          bit_count>>=1
-          if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
-            print ("result: ", result, "count2: ", count2, "count: ", count, "bit_count:", bit_count,"result_or: ", result_or) 
-          count2+=1
-        result_or |= result
-      count+=1
-      if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
-        print("FINISH result_or: ", result_or)
-        
-      big_number_result = big_number_result<<1 | result_or
-      
-      if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
-        print("NEXT BIT big_number_result: ", big_number_result, ", count: ", count)
-        
+
+    if True: #if not recursive:
       if ALLOW_PROMPT_MESSAGES and ENABLE_TIME_LEFT_APPEAR and CLI_MODE:
-        timing.count_time_and_print()
-      
+        timing = TimeLeft(cls.TIME_LEFT_ASSEMBLY_BOOL_ALG,filesize, True)
+      mask = 3
+      mini_lenght = int(log (boolean_functions[0][0],2))+1
+      count = 0
+      big_number_result = 0
+      while count < filesize:
+        result_or = 0
+        for i in boolean_functions:
+          ## Primeiro devemos recolher cada um dos minitermos e substituir cada caractere pela sua devida variável.
+          miniterm_q = i[0]
+          count2 = 0
+          bit_count = count
+          result = 1
+          if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE and (MORE_INFORMATION_OUTPUT or SHOW_MINITERM_OUTPUT):
+            print("miniterm:", miniterm_q, "bin: ", bin(miniterm_q))
+          while count2 < mini_lenght//2:
+            bits = miniterm_q & mask
+            if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE and MORE_INFORMATION_OUTPUT:
+              print ("({0}/{1}) processed, ".format(count2, mini_lenght//2), "teste0, bits: ", bits, "count:", count)
+            if bits != cls.BOOLEAN_VARIABLE_NOT_INCLUDED:
+              if bits == cls.BOOLEAN_VARIABLE_REPRESENTION:
+                if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE and MORE_INFORMATION_OUTPUT:
+                  print("teste1: ", bits, "bit_count & 1 == 1", bit_count & 1 == 1)
+                if bit_count & 1 == 1:
+                  result &= 1
+                else:
+                  result &= 0
+              elif bits == cls.NEGATE_BOOLEAN_VARIABLE_REPRESENTION:
+                if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE and MORE_INFORMATION_OUTPUT:
+                  print("teste2", bits,bit_count & 1 == 0)
+                if bit_count & 1 == 0:
+                  result &= 1 
+                else: 
+                  result &= 0
+              if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE and MORE_INFORMATION_OUTPUT:
+                print("result!!!", result)
+            miniterm_q>>=2
+            bit_count>>=1
+            if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE and MORE_INFORMATION_OUTPUT:
+              print ("result: ", result, "count2: ", count2, "count: ", count, "bit_count:", bit_count,"result_or: ", result_or) 
+            count2+=1
+          result_or |= result
+        count+=1
+        if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+          print("FINISH result_or: ", result_or)
+          
+        big_number_result = big_number_result<<1 | result_or
+        
+        if DEBUG and ALLOW_PROMPT_MESSAGES and CLI_MODE:
+          print("NEXT BIT big_number_result: ", big_number_result, ", count: ", count)
+          
+        if ALLOW_PROMPT_MESSAGES and ENABLE_TIME_LEFT_APPEAR and CLI_MODE:
+          timing.count_time_and_print()
+    '''
+    else:
+      cls.NUMBER_RECURSIVE_FUNCTIONS = 1
+      big_number_result = cls.truth_table_recursive (boolean_functions, filesize)
+      if ALLOW_PROMPT_MESSAGES and DEBUG and CLI_MODE:
+        print("TEST: big_number_result: ", big_number_result, ", bin(big_number_result): ", bin(big_number_result), "len(bin(big_number_result)) -2: ", len(bin(big_number_result))-2)
+      #exit(0)
+    '''
+        
     if ALLOW_PROMPT_MESSAGES and CLI_MODE:
       print(cls.MESSAGE_SET_BOOLEAN_ALGEBRA_COMPL)
     
@@ -1649,7 +1737,7 @@ class EggCellCompactor:
       cls.revert_big_number(number, filename, is_binary)
       con.close()
     if ALLOW_PROMPT_MESSAGES and CLI_MODE:
-      print (cls.MESSAGE_SUCCESSFULLY_RECOVERED)
+      print(cls.MESSAGE_SUCCESSFULLY_RECOVERED)
       print(cls.MESSAGE_DECOMPRESSION_FINISH)
 
 ## Main program
